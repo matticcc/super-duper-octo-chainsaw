@@ -24,6 +24,7 @@ API_URL        = (
 )
 POLL_INTERVAL  = 10        # seconds between API polls
 PROMO_INTERVAL = 30 * 60   # 30 minutes
+STATS_RETRY_DELAYS = [2, 3, 5]   # seconds to wait if totalWinners/totalAmount missing
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -171,6 +172,29 @@ def fetch_latest() -> dict | None:
         log.warning("Fetch error: %s", e)
         return None
 
+
+def fetch_latest_with_stats(expected_id) -> dict | None:
+    """
+    Fetch the latest round. If totalWinners/totalAmount are still missing
+    (stats sometimes populate a moment after the round resolves), retry a
+    few times with short delays before giving up and posting without them.
+    """
+    payload = fetch_latest()
+    if not payload:
+        return None
+
+    for delay in STATS_RETRY_DELAYS:
+        has_stats = payload.get("totalWinners") is not None and payload.get("totalAmount") is not None
+        same_round = (payload.get("id") or payload.get("transmissionId")) == expected_id
+        if has_stats or not same_round:
+            break
+        time.sleep(delay)
+        refreshed = fetch_latest()
+        if refreshed:
+            payload = refreshed
+
+    return payload
+
 # ── Promo loop ─────────────────────────────────────────────────────────────────
 def promo_loop():
     log.info("📢 Promo loop started  |  interval=%sm", PROMO_INTERVAL // 60)
@@ -196,6 +220,9 @@ def polling_loop():
             if game_id and game_id != last_id:
                 log.info("🆕 New round: %s", game_id)
                 try:
+                    # Give totalWinners/totalAmount a chance to populate if missing
+                    if payload.get("totalWinners") is None or payload.get("totalAmount") is None:
+                        payload = fetch_latest_with_stats(game_id) or payload
                     msg = build_message(payload)
                     if send_message(msg) is not None:
                         last_id = game_id
